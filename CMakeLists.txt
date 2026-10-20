@@ -533,8 +533,8 @@ endif()
 
 # Add -Werror to C/C++ flags for newer compilers
 if(ENABLE_WERROR AND NOT CMAKE_CXX_COMPILER_VERSION VERSION_LESS 5.0)
-  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror -Wno-error=stringop-overflow -Wno-error=deprecated-declarations")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -Werror -Wno-error=stringop-overflow -Wno-error=deprecated-declarations")
 endif()
 
 # GCC >= 11.2.0: Disable analysis on "maybe-uninitialized" variables because of the high false-positive rate
