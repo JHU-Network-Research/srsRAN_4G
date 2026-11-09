@@ -242,6 +242,9 @@ public:
   bool pack_security_mode_command(srsran::byte_buffer_t* nas_buffer);
   bool pack_esm_information_request(srsran::byte_buffer_t* nas_buffer);
   bool pack_identity_request(srsran::byte_buffer_t* nas_buffer);
+  // Packs and sends an Identity Request (IMSI) for this context. Used to guarantee the
+  // IMSI is solicited before a UE is rejected on paths where only an M-TMSI is known.
+  bool send_identity_request();
   bool pack_emm_information(srsran::byte_buffer_t* nas_buffer);
   bool pack_service_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause);
   bool pack_tracking_area_update_reject(srsran::byte_buffer_t* nas_buffer, uint8_t emm_cause);

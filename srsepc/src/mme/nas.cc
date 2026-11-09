@@ -605,18 +605,24 @@ bool nas::handle_service_request(uint32_t                m_tmsi,
   if (imsi == 0) {
     srsran::console("Could not find IMSI from M-TMSI. M-TMSI 0x%x\n", m_tmsi);
     nas_logger.error("Could not find IMSI from M-TMSI. M-TMSI 0x%x", m_tmsi);
-    nas nas_tmp(args, itf);
-    nas_tmp.m_ecm_ctx.enb_ue_s1ap_id = enb_ue_s1ap_id;
-    nas_tmp.m_ecm_ctx.mme_ue_s1ap_id = s1ap->get_next_mme_ue_s1ap_id();
 
-    srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
-    if (nas_tx == nullptr) {
-      nas_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
-      return false;
-    }
-    nas_tmp.pack_service_reject(nas_tx.get(), LIBLTE_MME_EMM_CAUSE_IMPLICITLY_DETACHED);
-    s1ap->send_downlink_nas_transport(enb_ue_s1ap_id, nas_tmp.m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), *enb_sri);
-    return true;
+    // The UE's IMSI is unknown (only the M-TMSI was provided and it could not be resolved).
+    // Guarantee the IMSI is solicited before the UE is turned away: create a context, request
+    // the IMSI via an Identity Request, and let the Identity Response re-drive the normal flow
+    // (HSS lookup + authentication). The UE is only rejected if it still fails once the IMSI is
+    // known.
+    nas* nas_ctx                      = new nas(args, itf);
+    nas_ctx->m_emm_ctx.imsi           = 0;
+    nas_ctx->m_emm_ctx.state          = EMM_STATE_DEREGISTERED;
+    nas_ctx->m_ecm_ctx.enb_ue_s1ap_id = enb_ue_s1ap_id;
+    nas_ctx->m_ecm_ctx.mme_ue_s1ap_id = s1ap->get_next_mme_ue_s1ap_id();
+    memcpy(&nas_ctx->m_ecm_ctx.enb_sri, enb_sri, sizeof(struct sctp_sndrcvinfo));
+
+    // Store temporary UE context so the Identity Response can be routed back to it
+    s1ap->add_nas_ctx_to_mme_ue_s1ap_id_map(nas_ctx);
+    s1ap->add_ue_to_enb_set(enb_sri->sinfo_assoc_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
+
+    return nas_ctx->send_identity_request();
   }
 
   nas* nas_ctx = s1ap->find_nas_ctx_from_imsi(imsi);
@@ -837,6 +843,29 @@ bool nas::handle_tracking_area_update_request(uint32_t                m_tmsi,
   hss_interface_nas*  hss  = itf.hss;
   gtpc_interface_nas* gtpc = itf.gtpc;
 
+  // If the UE's IMSI cannot be resolved from the M-TMSI, guarantee the IMSI is solicited
+  // before turning the UE away: create a context, send an Identity Request, and let the
+  // Identity Response re-drive the normal flow instead of immediately rejecting.
+  uint64_t imsi = s1ap->find_imsi_from_m_tmsi(m_tmsi);
+  if (imsi == 0) {
+    srsran::console("Could not find IMSI from M-TMSI. M-TMSI 0x%x\n", m_tmsi);
+    nas_logger.error("Could not find IMSI from M-TMSI. M-TMSI 0x%x", m_tmsi);
+
+    nas* nas_ctx                      = new nas(args, itf);
+    nas_ctx->m_emm_ctx.imsi           = 0;
+    nas_ctx->m_emm_ctx.state          = EMM_STATE_DEREGISTERED;
+    nas_ctx->m_ecm_ctx.enb_ue_s1ap_id = enb_ue_s1ap_id;
+    nas_ctx->m_ecm_ctx.mme_ue_s1ap_id = s1ap->get_next_mme_ue_s1ap_id();
+    memcpy(&nas_ctx->m_ecm_ctx.enb_sri, enb_sri, sizeof(struct sctp_sndrcvinfo));
+
+    // Store temporary UE context so the Identity Response can be routed back to it
+    s1ap->add_nas_ctx_to_mme_ue_s1ap_id_map(nas_ctx);
+    s1ap->add_ue_to_enb_set(enb_sri->sinfo_assoc_id, nas_ctx->m_ecm_ctx.mme_ue_s1ap_id);
+
+    return nas_ctx->send_identity_request();
+  }
+
+  // IMSI is known; TAU is not supported, so reject to trigger a full re-attach by the UE.
   // TODO don't search for NAS ctxt, just send that reject
   // with context we could enable integrity protection
 
@@ -1259,6 +1288,12 @@ bool nas::handle_tracking_area_update_request(srsran::byte_buffer_t* nas_rx)
 
   srsran::unique_byte_buffer_t nas_tx;
 
+  // Guarantee the IMSI is solicited before rejecting: if this context somehow has no IMSI yet,
+  // request it and let the Identity Response re-drive the flow instead of rejecting blindly.
+  if (m_emm_ctx.imsi == 0) {
+    return send_identity_request();
+  }
+
   /* TAU handling unsupported, therefore send TAU reject with cause IMPLICITLY DETACHED.
    * this will trigger full re-attach by the UE, instead of going to a TAU request loop */
   nas_tx = srsran::make_byte_buffer();
@@ -1639,6 +1674,23 @@ bool nas::pack_identity_request(srsran::byte_buffer_t* nas_buffer)
     srsran::console("Error packing Identity Request\n");
     return false;
   }
+  return true;
+}
+
+bool nas::send_identity_request()
+{
+  srsran::unique_byte_buffer_t nas_tx = srsran::make_byte_buffer();
+  if (nas_tx == nullptr) {
+    m_logger.error("Couldn't allocate PDU in %s().", __FUNCTION__);
+    return false;
+  }
+  if (!pack_identity_request(nas_tx.get())) {
+    return false;
+  }
+  m_s1ap->send_downlink_nas_transport(
+      m_ecm_ctx.enb_ue_s1ap_id, m_ecm_ctx.mme_ue_s1ap_id, nas_tx.get(), m_ecm_ctx.enb_sri);
+  m_logger.info("Downlink NAS: Sending Identity Request (IMSI) before rejecting UE");
+  srsran::console("Downlink NAS: Sending Identity Request (IMSI) before rejecting UE\n");
   return true;
 }
 
